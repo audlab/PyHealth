@@ -75,6 +75,7 @@ def masked_log_loss(
         raise ValueError("Prediction, target and validity shapes must match")
 
     p, y = predictions[valid_mask], targets[valid_mask]
+
     if p.numel() == 0:
         raise ValueError("No valid prediction hours in this batch")
 
@@ -84,6 +85,7 @@ def masked_log_loss(
         raise ValueError(
             "Valid predictions and targets must be finite and positive"
         )
+
     return (p.log() - y.log()).square().mean()
 
 
@@ -125,6 +127,7 @@ class TPCLayer(nn.Module):
     ) -> None:
         """Set up the temporal and pointwise layers."""
         super().__init__()
+
         self.groups = groups
         self.temporal_out = temporal_out
         self.point_out = point_out
@@ -172,7 +175,10 @@ class TPCLayer(nn.Module):
         pieces = [
             value
             for value in (
-                previous_temporal, previous_point, raw, repeated_static
+                previous_temporal,
+                previous_point,
+                raw,
+                repeated_static,
             )
             if value is not None
         ]
@@ -181,19 +187,35 @@ class TPCLayer(nn.Module):
         )
 
         if previous_point is not None:
-            point_skip = torch.cat([
-                point_skip,
-                previous_point.reshape(b, t, -1).transpose(1, 2),
-            ], dim=1)
+            point_skip = torch.cat(
+                [
+                    point_skip,
+                    previous_point.reshape(b, t, -1).transpose(1, 2),
+                ],
+                dim=1,
+            )
 
-        temporal_and_skip = torch.cat([
-            point_skip.unsqueeze(2),
-            temporal.reshape(b, self.groups, self.temporal_out, t),
-        ], dim=2)
+        temporal_and_skip = torch.cat(
+            [
+                point_skip.unsqueeze(2),
+                temporal.reshape(
+                    b,
+                    self.groups,
+                    self.temporal_out,
+                    t,
+                ),
+            ],
+            dim=2,
+        )
 
-        point_repeat = point.reshape(b, t, self.point_out).transpose(1, 2)
+        point_repeat = point.reshape(
+            b, t, self.point_out
+        ).transpose(1, 2)
         point_repeat = point_repeat.unsqueeze(2).expand(
-            -1, -1, self.temporal_out + 1, -1
+            -1,
+            -1,
+            self.temporal_out + 1,
+            -1,
         )
 
         combined = F.relu(
@@ -215,6 +237,11 @@ class TPC(BaseModel):
     showing how recently each value was measured, and scaled hour of day.
     The eICU indicators are 1 for a new reading, 0 if never measured, and
     1 / (gap_hours * 4/3) otherwise. They are separate from valid_mask.
+
+    Batch inputs have shape (B, 2 * F + 2, T), with time last. Pad along the
+    time dimension using a custom collator, such as collate_stays in
+    examples/tpc_los_support.py, and mark padded hours False in valid_mask.
+    PyHealth's default padding collator is not compatible with this layout.
 
     Predictions range from about 1/48 to 100 days. Loss is mean squared log error.
 
@@ -295,25 +322,36 @@ class TPC(BaseModel):
         super().__init__(dataset=dataset)
 
         sizes = (
-            features, kernel_size, temporal_channels,
-            point_channels, diagnosis_hidden, final_hidden,
+            features,
+            kernel_size,
+            temporal_channels,
+            point_channels,
+            diagnosis_hidden,
+            final_hidden,
         )
+
         if any(
-            not isinstance(value, int) or value < 1 for value in sizes
+            not isinstance(value, int) or value < 1
+            for value in sizes
         ):
             raise ValueError(
                 "Feature/channel/kernel sizes must be positive integers"
             )
+
         if static_dim < 0 or diagnosis_dim < 0:
             raise ValueError(
                 "Static and diagnosis dimensions must be nonnegative"
             )
+
         if not dilation_rates or any(
-            not isinstance(d, int) or d < 1 for d in dilation_rates
+            not isinstance(d, int) or d < 1
+            for d in dilation_rates
         ):
             raise ValueError("Supply positive integer dilations explicitly")
+
         if not (
-            0 <= main_dropout < 1 and 0 <= temporal_dropout < 1
+            0 <= main_dropout < 1
+            and 0 <= temporal_dropout < 1
         ):
             raise ValueError("Dropout probabilities must be in [0, 1)")
 
@@ -326,23 +364,31 @@ class TPC(BaseModel):
         self.layers = nn.ModuleList()
 
         cumulative = previous_point = previous_temporal = 0
+
         for i, dilation in enumerate(dilation_rates):
             groups = features + cumulative
             point_in = (
                 (groups - previous_point) * previous_temporal
-                + previous_point + 2 * features + 2 + static_dim
+                + previous_point
+                + 2 * features
+                + 2
+                + static_dim
             )
-            self.layers.append(TPCLayer(
-                groups,
-                2 if i == 0 else 1 + previous_temporal,
-                temporal_channels,
-                point_in,
-                point_channels,
-                kernel_size,
-                dilation,
-                main_dropout,
-                temporal_dropout,
-            ))
+
+            self.layers.append(
+                TPCLayer(
+                    groups,
+                    2 if i == 0 else 1 + previous_temporal,
+                    temporal_channels,
+                    point_in,
+                    point_channels,
+                    kernel_size,
+                    dilation,
+                    main_dropout,
+                    temporal_dropout,
+                )
+            )
+
             previous_temporal = temporal_channels
             previous_point = point_channels
             cumulative += point_channels
@@ -352,6 +398,7 @@ class TPC(BaseModel):
         )
 
         self.diagnosis_encoder = None
+
         if diagnosis_dim:
             self.diagnosis_encoder = nn.Sequential(
                 nn.Linear(diagnosis_dim, diagnosis_hidden),
@@ -360,9 +407,11 @@ class TPC(BaseModel):
             )
 
         head_in = (
-            output_channels + static_dim
+            output_channels
+            + static_dim
             + (diagnosis_hidden if diagnosis_dim else 0)
         )
+
         self.head = nn.Sequential(
             nn.Linear(head_in, final_hidden),
             nn.Dropout(main_dropout),
@@ -405,9 +454,13 @@ class TPC(BaseModel):
         x = x.to(device=self.device, dtype=torch.float32)
         static = static.to(device=self.device, dtype=torch.float32)
         diagnoses = diagnoses.to(
-            device=self.device, dtype=torch.float32
+            device=self.device,
+            dtype=torch.float32,
         )
-        valid = valid_mask.to(device=self.device, dtype=torch.bool)
+        valid = valid_mask.to(
+            device=self.device,
+            dtype=torch.bool,
+        )
 
         if x.ndim != 3 or x.shape[1] != 2 * self.features + 2:
             raise ValueError(
@@ -415,19 +468,24 @@ class TPC(BaseModel):
             )
 
         b, channels, t = x.shape
+
         if (
             static.shape != (b, self.static_dim)
             or diagnoses.shape != (b, self.diagnosis_dim)
         ):
             raise ValueError("Incorrect static or diagnosis dimensions")
+
         if valid.shape != (b, t):
             raise ValueError("Incorrect prediction mask dimensions")
 
         values, masks = torch.split(
-            x[:, 1:-1], self.features, dim=1
+            x[:, 1:-1],
+            self.features,
+            dim=1,
         )
         next_x = torch.stack(
-            (values, masks), dim=2
+            (values, masks),
+            dim=2,
         ).reshape(b, -1, t)
 
         raw = x.transpose(1, 2).reshape(b * t, channels)
@@ -437,16 +495,22 @@ class TPC(BaseModel):
 
         for layer in self.layers:
             next_x, point_skip, previous_temporal, previous_point = layer(
-                next_x, raw, repeated_static, point_skip,
-                previous_temporal, previous_point,
+                next_x,
+                raw,
+                repeated_static,
+                point_skip,
+                previous_temporal,
+                previous_point,
             )
 
         parts = [repeated_static]
+
         if self.diagnosis_encoder is not None:
             diagnosis_embedding = self.diagnosis_encoder(diagnoses)
             parts.append(
                 diagnosis_embedding.repeat_interleave(t, dim=0)
             )
+
         parts.append(
             next_x.transpose(1, 2).reshape(b * t, -1)
         )
@@ -456,10 +520,12 @@ class TPC(BaseModel):
         ).reshape(b, t)
 
         predictions = log_prediction.clamp(
-            math.log(1 / 48), math.log(100)
+            math.log(1 / 48),
+            math.log(100),
         ).exp()
 
         selected = predictions[valid].reshape(-1, 1)
+
         result = {
             "predictions": predictions,
             "y_prob": selected,
@@ -468,10 +534,13 @@ class TPC(BaseModel):
 
         if targets is not None:
             targets = targets.to(
-                device=self.device, dtype=torch.float32
+                device=self.device,
+                dtype=torch.float32,
             )
             result["loss"] = masked_log_loss(
-                predictions, targets, valid
+                predictions,
+                targets,
+                valid,
             )
             result["y_true"] = targets[valid].reshape(-1, 1)
 
